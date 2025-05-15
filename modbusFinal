@@ -35,10 +35,10 @@ void terminal_input_thread() {
             } else if (input == "stop") {		//Sætter Coil[0] til 0 (Gør 'Digital Output' passiv)
                 mb_mapping->tab_bits[0] = 0;
                 std::cout << "Coil[0] sat til 0\n";
-            } else if (input == "in1") {		//Sætter Input[0] til 1 (Gør 'Digital Input' aktiv)
+            } else if (input == "in1") {		//Sætter Input[0] til 1 (Gør 'Digital Input' høj)
                 mb_mapping->tab_input_bits[0] = 1;
                 std::cout << "Input[0] sat til 1\n";
-            } else if (input == "in0") {		//Sætter Input[0] til 0 (Gør 'Digital Input' passiv)
+            } else if (input == "in0") {		//Sætter Input[0] til 0 (Gør 'Digital Input' lav)
                 mb_mapping->tab_input_bits[0] = 0;
                 std::cout << "Input[0] sat til 0\n";
             } else if (input == "exit") {		//Afslutter programmet
@@ -64,8 +64,8 @@ int main() {
 
     // Alloker både coils og discrete inputs
     mb_mapping = modbus_mapping_new(
-        1,  // 1 coil 			(Digital Output)
-        1,  // 1 discrete input 	(Digital Input)
+        1,  // 1 Discrete input 	(Digital Output skriver til)
+        1,  // 1 Discrete output 	(Digital Input læser fra)
         0, 0  // Ingen holding/input registers
     );
     if (!mb_mapping) {
