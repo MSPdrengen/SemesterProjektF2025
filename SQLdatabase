@@ -1,0 +1,213 @@
+#include <iostream>
+#include <sqlite3.h>
+#include <string>
+
+/* Før det virker:
+På Raspberry Pi'en skal der skrives: 
+	sudo apt-get update
+	sudo apt-get install libsqlite3-dev
+
+Dernæst kompiler koden:
+	g++ -std=c++17 SQLdatabase.cpp -lsqlite3 -o SQLdatabase
+
+Kør koden:
+	./SQLdatabase
+
+*/
+
+
+
+// Callback function for printing SELECT results
+int callback(void* NotUsed, int argc, char** argv, char** azColName) {
+    for (int i = 0; i < argc; i++) {
+        std::cout << azColName[i] << ": " << (argv[i] ? argv[i] : "NULL") << "\t";
+    }
+    std::cout << std::endl;
+    return 0;
+}
+
+void printAll(sqlite3* db) {
+    char* errMsg = nullptr;
+    const char* sqlSelect = "SELECT * FROM box;";
+    std::cout << "\nAll boxes in the database:\n";
+    int rc = sqlite3_exec(db, sqlSelect, callback, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Error during SELECT: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    }
+}
+
+// Function to check if a box already exists
+bool boxExists(sqlite3* db, const std::string& name, const std::string& size) {
+    std::string sqlCheck = "SELECT COUNT(*) FROM box WHERE name = '" + name + "' AND size = '" + size + "';";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sqlCheck.c_str(), -1, &stmt, nullptr);
+    bool exists = false;
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW) {
+            int count = sqlite3_column_int(stmt, 0);
+            exists = (count > 0);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
+int main() {
+    sqlite3* db;
+    char* errMsg = nullptr;
+
+    // 1. Open/create database
+    int rc = sqlite3_open("my_database.db", &db);
+    if (rc) {
+        std::cerr << "Cannot open database: " << sqlite3_errmsg(db) << std::endl;
+        return 1;
+    }
+
+    // 2. Create table if it does not exist
+    const char* sqlCreate = "CREATE TABLE IF NOT EXISTS box("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                            "name TEXT NOT NULL, "
+                            "size TEXT NOT NULL);";
+    rc = sqlite3_exec(db, sqlCreate, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Error creating table: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    }
+
+    std::cout << "Enter boxes! Type 'stop' as name to finish input.\n";
+    // 3. Insert multiple boxes
+    while (true) {
+        std::string name, size;
+
+        std::cout << "\nEnter name: ";
+        std::getline(std::cin, name);
+
+        if (name == "stop") {
+            break;
+        }
+
+        // Simple validation of size
+        bool valid = false;
+        while (!valid) {
+            std::cout << "Enter size (small/medium/large): ";
+            std::getline(std::cin, size);
+            if (size == "small" || size == "medium" || size == "large") {
+                valid = true;
+            } else {
+                std::cout << "Invalid size! Please try again.\n";
+            }
+        }
+
+        // Check for duplicates
+        if (boxExists(db, name, size)) {
+            std::cout << "A box with that name and size already exists!\n";
+            continue;
+        }
+
+        // Insert into database
+        std::string sqlInsert = "INSERT INTO box (name, size) VALUES ('" +
+                                name + "', '" + size + "');";
+        rc = sqlite3_exec(db, sqlInsert.c_str(), nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            std::cerr << "Error during insert: " << errMsg << std::endl;
+            sqlite3_free(errMsg);
+        } else {
+            std::cout << "Box inserted!\n";
+        }
+    }
+
+    // Option to delete/edit boxes
+    while (true) {
+        printAll(db);
+
+        std::cout << "\nChoose an action:\n";
+        std::cout << "1: Delete box\n";
+        std::cout << "2: Edit box\n";
+        std::cout << "3: Exit\n";
+        std::cout << "Enter choice: ";
+        std::string choice;
+        std::getline(std::cin, choice);
+
+        if (choice == "1") {
+            std::string id;
+            std::cout << "Enter id of the box to delete: ";
+            std::getline(std::cin, id);
+
+            std::string sqlDelete = "DELETE FROM box WHERE id = " + id + ";";
+            rc = sqlite3_exec(db, sqlDelete.c_str(), nullptr, nullptr, &errMsg);
+            if (rc != SQLITE_OK) {
+                std::cerr << "Error during delete: " << errMsg << std::endl;
+                sqlite3_free(errMsg);
+            } else {
+                std::cout << "Box deleted!\n";
+            }
+        }
+        else if (choice == "2") {
+            std::string id;
+            std::cout << "Enter id of the box to edit: ";
+            std::getline(std::cin, id);
+
+            std::string newName, newSize;
+            std::cout << "New name: ";
+            std::getline(std::cin, newName);
+
+            bool valid = false;
+            while (!valid) {
+                std::cout << "New size (small/medium/large): ";
+                std::getline(std::cin, newSize);
+                if (newSize == "small" || newSize == "medium" || newSize == "large") {
+                    valid = true;
+                } else {
+                    std::cout << "Invalid size! Please try again.\n";
+                }
+            }
+
+            // Check for duplicates (except for the same id)
+            std::string sqlCheck = "SELECT id FROM box WHERE name = '" + newName + "' AND size = '" + newSize + "';";
+            sqlite3_stmt* stmt;
+            bool duplicate = false;
+            rc = sqlite3_prepare_v2(db, sqlCheck.c_str(), -1, &stmt, nullptr);
+            if (rc == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    std::string found_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                    if (found_id != id) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+            sqlite3_finalize(stmt);
+
+            if (duplicate) {
+                std::cout << "A box with that name and size already exists!\n";
+                continue;
+            }
+
+            std::string sqlUpdate = "UPDATE box SET name = '" + newName +
+                                    "', size = '" + newSize +
+                                    "' WHERE id = " + id + ";";
+            rc = sqlite3_exec(db, sqlUpdate.c_str(), nullptr, nullptr, &errMsg);
+            if (rc != SQLITE_OK) {
+                std::cerr << "Error during update: " << errMsg << std::endl;
+                sqlite3_free(errMsg);
+            } else {
+                std::cout << "Box updated!\n";
+            }
+        }
+        else if (choice == "3") {
+            break;
+        }
+        else {
+            std::cout << "Invalid choice!\n";
+        }
+    }
+
+    // Print all boxes at the end
+    printAll(db);
+
+    sqlite3_close(db);
+    return 0;
+}
+
