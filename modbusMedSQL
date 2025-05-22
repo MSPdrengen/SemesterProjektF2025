@@ -1,0 +1,192 @@
+#include <modbus/modbus.h>
+#include <sqlite3.h>
+#include <iostream>
+#include <cstring>
+#include <csignal>
+#include <unistd.h>
+#include <cstdlib>
+#include <cerrno>
+#include <thread>
+#include <chrono>
+
+/*
+	Kompiler, skriv:
+		g++ -std=c++17 -o modbusMedSQL modbusMedSQL.cpp -lmodbus -lsqlite3 -lpthread
+	Kør, skriv (Port 502, derfor 'sudo' først): 
+		sudo ./modbusMedSQL
+
+	-----------------------------------------------
+
+	Når coil[0] eller input[0] ændres (via Modbus eller terminal), logges dette i databasen.
+
+	Der kan manuelt tilføjes til databasen i terminalen:
+	Skriv f.eks. 'addbox large' og tryk Enter.
+
+	Afslut programmet med exit.
+*/
+
+
+
+modbus_t *ctx = nullptr;
+modbus_mapping_t *mb_mapping = nullptr;
+int server_socket = -1;
+int previous_coil_value = -1;
+int previous_input_value = -1;
+sqlite3* db = nullptr;
+char* errMsg = nullptr;
+
+// Oprydning med 'Ctrl+C' eller ved 'exit' i terminal
+void cleanup(int signum) {
+    std::cout << "\nCleaning up and exiting...\n";
+    if (server_socket != -1) close(server_socket);
+    if (ctx) modbus_free(ctx);
+    if (mb_mapping) modbus_mapping_free(mb_mapping);
+    if (db) sqlite3_close(db);
+    exit(0);
+}
+
+// Terminal-kommandotråd
+void terminal_input_thread() {
+    std::string input;
+    while (true) {
+        std::getline(std::cin, input);
+        if (!input.empty()) {
+            if (input == "start") {
+                mb_mapping->tab_bits[0] = 1;
+                std::cout << "Coil[0] sat til 1\n";
+            } else if (input == "stop") {
+                mb_mapping->tab_bits[0] = 0;
+                std::cout << "Coil[0] sat til 0\n";
+            } else if (input == "in1") {
+                mb_mapping->tab_input_bits[0] = 1;
+                std::cout << "Input[0] sat til 1\n";
+            } else if (input == "in0") {
+                mb_mapping->tab_input_bits[0] = 0;
+                std::cout << "Input[0] sat til 0\n";
+            } else if (input.rfind("addbox ", 0) == 0) { // Tilføj til database manuelt
+                std::string size = input.substr(7);
+                std::string sqlInsert = "INSERT INTO box (size) VALUES ('" + size + "');";
+                int rc = sqlite3_exec(db, sqlInsert.c_str(), nullptr, nullptr, &errMsg);
+                if (rc != SQLITE_OK) {
+                    std::cerr << "Error during insert: " << errMsg << std::endl;
+                    sqlite3_free(errMsg);
+                } else {
+                    std::cout << "Box inserted med size: " << size << std::endl;
+                }
+            } else if (input == "exit") {
+                cleanup(0);
+            } else {
+                std::cout << "Ukendt kommando! Brug: start, stop, in1, in0, addbox <size>, exit\n";
+            }
+        }
+    }
+}
+
+int main() {
+    // ---- OPRETTELSE AF SQL-DATABASE ----
+    int rc = sqlite3_open("my_database.db", &db);
+    if (rc) {
+        std::cerr << "Cannot open database: " << sqlite3_errmsg(db) << std::endl;
+        return 1;
+    }
+
+    // Opret tabel hvis den ikke findes
+    const char* sqlCreate = "CREATE TABLE IF NOT EXISTS box("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                            "size TEXT NOT NULL);";
+    rc = sqlite3_exec(db, sqlCreate, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Error creating table: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        sqlite3_close(db);
+        return 1;
+    }
+
+    signal(SIGINT, cleanup);
+
+    // ---- OPRETTELSE AF TCP-SERVER ----
+    ctx = modbus_new_tcp("0.0.0.0", 502);
+    if (!ctx) {
+        std::cerr << "Kunne ikke oprette Modbus context\n";
+        return -1;
+    }
+
+    // Alloker coils og discrete inputs
+    mb_mapping = modbus_mapping_new(
+        1,  // 1 Discrete output (coils)
+        1,  // 1 Discrete input
+        0, 0  // Ingen holding/input registers
+    );
+    if (!mb_mapping) {
+        std::cerr << "Mapping fejl: " << modbus_strerror(errno) << std::endl;
+        modbus_free(ctx);
+        return -1;
+    }
+
+    // Start lytning
+    server_socket = modbus_tcp_listen(ctx, 1);
+    if (server_socket == -1) {
+        std::cerr << "Lytte-fejl: " << modbus_strerror(errno) << std::endl;
+        modbus_free(ctx);
+        modbus_mapping_free(mb_mapping);
+        return -1;
+    }
+    std::cout << "Modbus TCP Server kører på port 502...\n";
+
+    // Accepter forbindelse fra UR-robotten
+    modbus_tcp_accept(ctx, &server_socket);
+
+    // Start terminaltråd
+    std::thread t_input(terminal_input_thread);
+    t_input.detach();
+
+    // Modtag og håndtér forespørgsler
+    while (true) {
+        uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
+        int rc = modbus_receive(ctx, query);
+
+        if (rc > 0) {
+            modbus_reply(ctx, query, rc, mb_mapping);
+
+            // Tjek om coil[0] er blevet ændret siden sidst
+            if (mb_mapping->tab_bits[0] != previous_coil_value) {
+                std::cout << "Coil[0] ændret til: " << (int)mb_mapping->tab_bits[0] << std::endl;
+                previous_coil_value = mb_mapping->tab_bits[0];
+
+                // Indsæt ændringen i databasen
+                std::string size = std::to_string(mb_mapping->tab_bits[0]);
+                std::string sqlInsert = "INSERT INTO box (size) VALUES ('" + size + "');";
+                int rc2 = sqlite3_exec(db, sqlInsert.c_str(), nullptr, nullptr, &errMsg);
+                if (rc2 != SQLITE_OK) {
+                    std::cerr << "Error during insert: " << errMsg << std::endl;
+                    sqlite3_free(errMsg);
+                } else {
+                    std::cout << "Box inserted med size: " << size << std::endl;
+                }
+            }
+
+            // Tjek om input[0] er blevet ændret siden sidst
+            if (mb_mapping->tab_input_bits[0] != previous_input_value) {
+                std::cout << "Input[0] er nu: " << (int)mb_mapping->tab_input_bits[0] << std::endl;
+                previous_input_value = mb_mapping->tab_input_bits[0];
+
+                // Indsæt ændringen i databasen
+                std::string size = std::to_string(mb_mapping->tab_input_bits[0]);
+                std::string sqlInsert = "INSERT INTO box (size) VALUES ('" + size + "');";
+                int rc3 = sqlite3_exec(db, sqlInsert.c_str(), nullptr, nullptr, &errMsg);
+                if (rc3 != SQLITE_OK) {
+                    std::cerr << "Error during insert: " << errMsg << std::endl;
+                    sqlite3_free(errMsg);
+                } else {
+                    std::cout << "Box inserted med size: " << size << std::endl;
+                }
+            }
+        } else if (rc == -1) {
+            // Ingen forespørgsler: vent 100ms for at spare CPU
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    cleanup(0);
+    return 0;
+}
