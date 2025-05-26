@@ -1,0 +1,136 @@
+#include <modbus/modbus.h>
+#include <iostream>
+#include <cstring>
+#include <csignal>
+#include <unistd.h>
+#include <cstdlib>
+#include <cerrno>
+#include <thread>
+#include <chrono>
+
+/*
+	Kompiler med:
+		g++ -o modbus modbus.cpp -lmodbus
+	Kør:
+		sudo ./modbus
+*/
+
+
+
+modbus_t *ctx; 			//Pointer til Modbus-kontekst (Bruges til at styre Modbus-forbindelsen)
+modbus_mapping_t *mb_mapping;	//Pointer til Modbus mapping-struktur (Indeholder værdier for coils, input, registre osv.)
+int server_socket = -1;		//Server-socket sat til -1 for at indikere, at den ikke er åben endnu
+int previous_coil_value = -1;	//Gemmer tidligere værdi af coil[0], bruges til at opdage ændringer
+int previous_input_value = -1;	//Gemmer tidligere værdi af input[0], bruges til at opdage ændringer
+
+// Oprydning med 'Ctrl+C' eller ved 'exit' i terminal
+void cleanup(int signum) {
+    std::cout << "\nCleaning up and exiting...\n";
+    if (server_socket != -1) close(server_socket);
+    if (ctx) modbus_free(ctx);
+    if (mb_mapping) modbus_mapping_free(mb_mapping);
+    exit(0);
+}
+
+// Terminal-kommandotråd
+void terminal_input_thread() {
+    std::string input;
+    while (true) {
+        std::getline(std::cin, input);
+        if (!input.empty()) {
+            if (input == "start") { 			//Sætter Coil[0] til 1 (Gør 'Digital Output' aktiv)
+                mb_mapping->tab_bits[0] = 1;
+                std::cout << "Coil[0] sat til 1\n";
+            } else if (input == "stop") {		//Sætter Coil[0] til 0 (Gør 'Digital Output' passiv)
+                mb_mapping->tab_bits[0] = 0;
+                std::cout << "Coil[0] sat til 0\n";
+            } else if (input == "in1") {		//Sætter Input[0] til 1 (Gør 'Digital Input' høj)
+                mb_mapping->tab_input_bits[0] = 1;
+                std::cout << "Input[0] sat til 1\n";
+            } else if (input == "in0") {		//Sætter Input[0] til 0 (Gør 'Digital Input' lav)
+                mb_mapping->tab_input_bits[0] = 0;
+                std::cout << "Input[0] sat til 0\n";
+            } else if (input == "exit") {		//Afslutter programmet
+                cleanup(0);
+            } else {
+                std::cout << "Ukendt kommando! Brug: start, stop, in1, in0, exit\n"; //Fejlbesked
+            }
+        }
+    }
+}
+
+
+int main() {
+
+    signal(SIGINT, cleanup);
+
+    // Start Modbus TCP-server på port 502
+    ctx = modbus_new_tcp("0.0.0.0", 502);
+    if (!ctx) {
+        std::cerr << "Kunne ikke oprette Modbus context\n";
+        return -1;
+    }
+
+
+    // Alloker både coils og discrete inputs
+    mb_mapping = modbus_mapping_new(
+        1,  // 1 Discrete input 	(Digital Output skriver til)
+        1,  // 1 Discrete output 	(Digital Input læser fra)
+        0, 0  // Ingen holding/input registers
+    );
+    if (!mb_mapping) {
+        std::cerr << "Mapping fejl: " << modbus_strerror(errno) << std::endl;
+        modbus_free(ctx);
+        return -1;
+    }
+
+
+    // Start lytning
+    server_socket = modbus_tcp_listen(ctx, 1);
+    if (server_socket == -1) {
+        std::cerr << "Lytte-fejl: " << modbus_strerror(errno) << std::endl;
+        modbus_free(ctx);
+        modbus_mapping_free(mb_mapping);
+        return -1;
+    }
+
+    std::cout << "Modbus TCP Server kører på port 502...\n";
+
+
+    // Accepter forbindelse fra UR-robotten
+    modbus_tcp_accept(ctx, &server_socket);
+
+
+    // Start terminaltråd
+    std::thread t_input(terminal_input_thread);
+    t_input.detach();
+
+
+    // Modtag og håndtér forespørgsler
+    while (true) {
+        uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]; 	//Opretter buffer til modtagelse af Modbus TCP-forespørgsler
+        int rc = modbus_receive(ctx, query); 		//Modtager forespørgsel fra Modbus
+
+        if (rc > 0) {
+            modbus_reply(ctx, query, rc, mb_mapping); //Sender svar tilbage til klienten ud fra modtaget forespørgsel
+
+	    //Tjek om coil[0] er blevet ændret siden sidst
+            if (mb_mapping->tab_bits[0] != previous_coil_value) {
+                std::cout << "Coil[0] ændret til: " << (int)mb_mapping->tab_bits[0] << std::endl; //Udskriver ændring i coil[0] til terminal
+                previous_coil_value = mb_mapping->tab_bits[0]; //Opdatere den tidligere værdi
+            }
+
+	    //Tjek om input[0] er blevet ændret siden sidst
+            if (mb_mapping->tab_input_bits[0] != previous_input_value) {
+                std::cout << "Input[0] er nu: " << (int)mb_mapping->tab_input_bits[0] << std::endl; //Udskriver ændring i input[0] til terminal
+                previous_input_value = mb_mapping->tab_input_bits[0]; //Opdatere den tidligere værdi
+            }
+        } else if (rc == -1) {
+	    //Hvis ingen forespørgsler modtages, vent 100 ms for at undgå unødigt CPU-forbrug
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    cleanup(0);
+    return 0;
+}
