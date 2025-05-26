@@ -1,0 +1,56 @@
+#include <pigpio.h>
+#include <iostream>
+#include <unistd.h>  // for sleep
+
+int main() {
+    // Initialize the pigpio library
+    if (gpioInitialise() < 0) {
+        std::cerr << "pigpio initialization failed!" << std::endl;
+        return 1;
+    }
+
+    //const int PWM_GPIO = 13;
+    const int GPIO_24 = 24;
+    const int GPIO_26 = 26;
+    const int GPIO_8 = 8;
+    const int GPIO_7 = 7;
+
+    // Set GPIOs to input mode
+    gpioSetMode(GPIO_24, PI_INPUT); //åben gripper
+    gpioSetMode(GPIO_26, PI_INPUT); // lukket gripper
+    
+    // Set GPIOs to output mode
+    gpioSetMode(GPIO_8, PI_OUTPUT);
+    gpioSetMode(GPIO_7, PI_OUTPUT);
+
+    while (true) {
+        int val24 = gpioRead(GPIO_24);
+        int val26 = gpioRead(GPIO_26);
+        int direction = 0;
+
+	gpioWrite(GPIO_8, 0);
+	gpioWrite(GPIO_7, 0);
+    
+    int modBusRecieve;
+    int modBusSend;
+	//modBusRecive  = 0, åbner gripper
+	//modBusRecive = 1, lukker gripper
+	if (modBusRecive == 0 and val26){
+        std::cout << "åbner gripper" << std::endl;
+		gpioWrite(GPIO_8, 0);
+		gpioWrite(GPIO_7, 1);
+	} else if (modBusRecive == 1 and val24){
+        std::cout<< "lukke gripper" << std::endl;
+        gpioWrite(GPIO_7, 0);
+        gpioWrite)GPIO_8, 1);
+    } else if(!val26){
+		modBusSend = 1;
+	} else if(!val24){
+		modBusSend = 1;
+	}
+    }
+
+
+    gpioTerminate();  // Never reached in this loop, but good practice
+    return 0;
+}
